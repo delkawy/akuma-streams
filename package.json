@@ -1,0 +1,18 @@
+{
+  "name": "akuma-streams",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Coleção de providers Nuvio. Inclui o provider SushiAnimes (sushianimes.com.br → mp4 direto via CDN).",
+  "author": "delkawy",
+  "license": "UNLICENSED",
+  "scripts": {
+    "build": "node build.js",
+    "build:watch": "node build.js --watch",
+    "test": "node test/test_extractor.mjs",
+    "test:live": "node test_providers.mjs"
+  },
+  "dependencies": {},
+  "devDependencies": {
+    "esbuild": "^0.24.0"
+  }
+}
