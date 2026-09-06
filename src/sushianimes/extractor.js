@@ -1,8 +1,9 @@
-import { get, postAjax, headRequest, BASE } from './http.js';
+import { get, postAjax, headRequest, rangeProbe, BASE } from './http.js';
 import { makeLogger } from '../utils/logger.js';
 import * as cache from '../utils/cache.js';
 
 const log = makeLogger('sushi:extractor');
+const VERSION = '0.4.0';
 
 // ---------------------- HTML helpers (regex, sem cheerio para QuickJS) ----------------------
 
@@ -131,6 +132,7 @@ const CDN_HOSTS = [
   'cdn-s01.pixel-sus-4k-image.com',
   'cdn-s02.pixel-sus-4k-image.com',
   'cdn-s03.pixel-sus-4k-image.com',
+  'cdn-s04.pixel-sus-4k-image.com',
 ];
 
 // Gera candidatos de slug a partir do título TMDB.
@@ -146,7 +148,10 @@ function buildSlugCandidates(titles) {
       .replace(/^-+|-+$/g, '');
     if (!t) continue;
     out.add(t);
-    for (const suffix of ['-blu-ray', '-dublado', '-legendado', '-hd', '-fullhd']) {
+    for (const suffix of [
+      '-blu-ray', '-dublado', '-legendado', '-hd', '-fullhd',
+      '-completo', '-anime', '-tv',
+    ]) {
       out.add(t + suffix);
     }
   }
@@ -160,13 +165,26 @@ async function probeCdnUrl(slug, episode) {
     const urls = [
       `https://${host}/stream/m/${slug}/${ep}.mp4`,
       `https://${host}/stream/${slug}/${ep}.mp4`,
+      `https://${host}/stream/m/${slug}/${episode}.mp4`,
+      `https://${host}/stream/${slug}/${episode}.mp4`,
     ];
     for (const url of urls) {
-      const r = await headRequest(url, { headers: probeHeaders });
-      if (r.ok && r.contentType && r.contentType.includes('video')) {
-        log.info('CDN direct hit:', url, `(${r.contentLength} bytes)`);
-        return url;
-      }
+      // Tenta HEAD primeiro (mais rápido).
+      try {
+        const h = await headRequest(url, { headers: probeHeaders });
+        if (h.ok && h.contentType && /video/i.test(h.contentType)) {
+          log.info('CDN HEAD hit:', url);
+          return url;
+        }
+      } catch (_) {}
+      // Fallback: GET com Range (compatível com runtimes sem suporte a HEAD).
+      try {
+        const r = await rangeProbe(url, { headers: probeHeaders });
+        if (r.ok) {
+          log.info('CDN Range hit:', url);
+          return url;
+        }
+      } catch (_) {}
     }
   }
   return null;
@@ -276,6 +294,7 @@ async function getCached(path, ttlMs = 60_000) {
 }
 
 async function extractStreams(tmdbId, mediaType, season, episode, opts = {}) {
+  log.info(`sushianimes v${VERSION} | tmdbId=${tmdbId} ${mediaType} S${season}E${episode}`);
   const errors = [];
   let csrfToken = null;
   let anime = null;

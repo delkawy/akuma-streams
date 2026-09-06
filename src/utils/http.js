@@ -75,5 +75,29 @@ async function headRequest(url, opts = {}) {
   }
 }
 
-export { fetchText, fetchJson, postForm, headRequest, defaultHeaders, DEFAULT_UA };
-export default { fetchText, fetchJson, postForm, headRequest, defaultHeaders, DEFAULT_UA };
+// Range probe: GET com Range: bytes=0-1 → CDN retorna 206 Partial Content
+// se o arquivo existir. Funciona mesmo em runtimes que não suportam HEAD.
+async function rangeProbe(url, opts = {}) {
+  log.debug('RANGE', url);
+  try {
+    const headers = defaultHeaders(opts.headers);
+    headers['Range'] = 'bytes=0-0';
+    const res = await fetch(
+      url,
+      Object.assign({ method: 'GET' }, opts, { headers })
+    );
+    const ct = res.headers.get('content-type') || '';
+    const okStatus = res.status === 200 || res.status === 206;
+    return {
+      ok: okStatus && /video/i.test(ct),
+      status: res.status,
+      contentType: ct,
+      contentLength: parseInt(res.headers.get('content-length') || '0', 10),
+    };
+  } catch (err) {
+    return { ok: false, status: 0, error: err.message };
+  }
+}
+
+export { fetchText, fetchJson, postForm, headRequest, rangeProbe, defaultHeaders, DEFAULT_UA };
+export default { fetchText, fetchJson, postForm, headRequest, rangeProbe, defaultHeaders, DEFAULT_UA };
