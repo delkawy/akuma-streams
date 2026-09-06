@@ -3,7 +3,14 @@ import { makeLogger } from '../utils/logger.js';
 import * as cache from '../utils/cache.js';
 
 const log = makeLogger('sushi:extractor');
-const VERSION = '0.6.0';
+const VERSION = '0.7.0';
+
+// Cloudflare Worker que adiciona Referer + Origin pra tocar MP4 no player nativo.
+const PROXY_URL = 'https://akuma-streams-proxy.delkawy.workers.dev';
+
+function proxyUrl(cdnUrl) {
+  return `${PROXY_URL}/?u=${encodeURIComponent(cdnUrl)}`;
+}
 
 // ---------------------- Known shortcuts ----------------------
 // Para animes muito conhecidos, pula TUDO e retorna URL construída.
@@ -283,9 +290,10 @@ function makeStream({ url, quality, videoId, season, episode, playerName }) {
     name: `SushiAnimes • ${playerName || 'Direct CDN'}`,
     title: `S${season}E${episode}`,
     quality: quality || detectQuality(playerName, url),
-    url,
+    // Envelopa via Worker pra adicionar Referer antes de chegar no CDN.
+    // Player nativo do Nuvio não envia headers — proxy resolve isso.
+    url: proxyUrl(url),
     headers: {
-      Referer: `${BASE}/`,
       'User-Agent':
         'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 ' +
         '(KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36',
