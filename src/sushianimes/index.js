@@ -23,6 +23,8 @@ try {
     self.getStreams = getStreams;
     self.SushiAnimes = { getStreams };
   }
+  // Log pra confirmar que o bundle foi carregado (aparece no console do Nuvio)
+  log.info('SushiAnimes plugin v0.8.1 loaded');
 } catch (e) {
   // Ignora se globalThis não estiver disponível
 }
