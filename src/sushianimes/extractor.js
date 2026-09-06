@@ -1,9 +1,8 @@
-import { get, postAjax, headRequest, rangeProbe, BASE } from './http.js';
+import { get, postAjax } from './http.js';
 import { makeLogger } from '../utils/logger.js';
-import * as cache from '../utils/cache.js';
 
 const log = makeLogger('sushi:extractor');
-const VERSION = '0.7.0';
+const VERSION = '0.8.0';
 
 // Cloudflare Worker que adiciona Referer + Origin pra tocar MP4 no player nativo.
 const PROXY_URL = 'https://akuma-streams-proxy.delkawy.workers.dev';
@@ -12,49 +11,7 @@ function proxyUrl(cdnUrl) {
   return `${PROXY_URL}/?u=${encodeURIComponent(cdnUrl)}`;
 }
 
-// ---------------------- Known shortcuts ----------------------
-// Para animes muito conhecidos, pula TUDO e retorna URL construída.
-// Sem probe — a verificação pode falhar em runtimes QuickJS limitados.
-// Aceita múltiplos sistemas de ID (TMDB, MAL, AniList).
-const KNOWN_SLUGS = {
-  // TMDB IDs
-  '30981': 'monster-blu-ray',
-  '16273': 'naruto',
-  '30984': 'naruto-shippuden',
-  '21': 'one-piece',
-  '81340': 'bleach',
-  '1100': 'death-note',
-  '1': 'cowboy-bebop',
-  // MAL IDs (MyAnimeList)
-  '19': 'monster-blu-ray',      // Monster
-  '20': 'naruto',
-  '173': 'naruto-shippuden',
-  '21': 'one-piece',
-  '269': 'bleach',
-  '1535': 'death-note',
-  '1': 'cowboy-bebop',
-  // AniList IDs
-  '19': 'monster-blu-ray',
-  '20': 'naruto',
-  '173': 'naruto-shippuden',
-  '21': 'one-piece',
-  '269': 'bleach',
-  '1535': 'death-note',
-  '1': 'cowboy-bebop',
-};
-
-// Slugs primários que sempre tentamos para o episódio 1,
-// independentemente do TMDB ID. Útil quando o app passa ID não-mapeado.
-const ALWAYS_TRY_SLUGS = [
-  'monster-blu-ray', 'monster', 'monster-dublado',
-  'naruto', 'naruto-dublado',
-  'one-piece', 'one-piece-dublado',
-  'bleach', 'bleach-dublado',
-  'death-note', 'death-note-dublado',
-  'cowboy-bebop',
-];
-
-// ---------------------- HTML helpers (regex, sem cheerio para QuickJS) ----------------------
+// ---------------------- HTML helpers ----------------------
 
 function decodeEntities(s) {
   if (!s) return '';
@@ -65,6 +22,8 @@ function decodeEntities(s) {
     .replace(/&quot;/g, '"')
     .replace(/&#39;/g, "'")
     .replace(/&apos;/g, "'")
+    .replace(/&amp;quot;/g, '"')
+    .replace(/&amp;#39;/g, "'")
     .replace(/&#x([0-9a-fA-F]+);/g, (_, h) => String.fromCodePoint(parseInt(h, 16)))
     .replace(/&#(\d+);/g, (_, d) => String.fromCodePoint(parseInt(d, 10)));
 }
@@ -85,74 +44,140 @@ function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
 }
 
-// ---------------------- Search ----------------------
+// ---------------------- 1) Search via /ajax/posts ----------------------
+// Retorna JSON: { data: [{id, name, image, url, type}] }
+// URL completa é retornada pelo site — usamos pra extrair slug+id.
 
-function pickBestResult(html, query) {
-  const linkRe = /href="(?:\/anime\/|https?:\/\/[^\/]+\/anime\/)([a-z0-9-]+)-(\d+)(?=["'])/gi;
-  const seen = new Set();
-  const results = [];
-  let m;
-  while ((m = linkRe.exec(html)) !== null) {
-    const slug = m[1];
-    const id = m[2];
-    if (!seen.has(id)) {
-      seen.add(id);
-      results.push({ slug, id, href: `/anime/${slug}-${id}` });
-    }
-  }
-  if (!results.length) return null;
+// Score de similaridade entre o nome do item e a query.
+// Maior = melhor. -1 = sem match.
+function scoreItem(it, query) {
+  const name = (it.name || '').toLowerCase().trim();
+  const q = query.toLowerCase().trim();
+  if (!name || !q) return -1;
+  // 1) match exato
+  if (name === q) return 100;
+  // 2) match exato após remover sufixos comuns
+  const base = name.replace(/\s*\((dublado|legendado|blu-ray|tv|sub|dub)\)\s*$/i, '').trim();
+  if (base === q) return 90;
+  // 3) começa com a query
+  if (name.startsWith(q)) return 50;
+  // 4) contém
+  if (name.includes(q)) return 10;
+  return -1;
+}
 
-  const q = query.toLowerCase().replace(/[^a-z0-9]+/g, '');
-  let best = results[0];
+// Escolhe o item com maior score. Empate: primeiro que apareceu.
+function pickBestItem(items, query) {
+  if (!items || !items.length) return null;
+  let best = null;
   let bestScore = -1;
-  for (const r of results) {
-    const score = r.slug.toLowerCase().replace(/[^a-z0-9]+/g, '').includes(q) ? 100 : 0;
-    if (score > bestScore) {
-      bestScore = score;
-      best = r;
+  for (const it of items) {
+    const s = scoreItem(it, query);
+    if (s > bestScore) {
+      bestScore = s;
+      best = it;
     }
   }
   return best;
 }
 
+function parseAnimeFromItem(it) {
+  if (!it || !it.url) return null;
+  const m = it.url.match(/\/anime\/([a-z0-9-]+)-(\d+)\/?$/i);
+  if (!m) return null;
+  return { slug: m[1], id: m[2], name: it.name, href: `/anime/${m[1]}-${m[2]}` };
+}
+
 async function searchAnime(titles) {
-  for (const title of titles) {
-    const q = encodeURIComponent(title.split('|')[0].trim());
-    if (!q) continue;
-    const path = `/search/${q}`;
-    log.info('searching', path);
-    try {
-      const html = await get(path);
-      const found = pickBestResult(html, title);
-      if (found) {
-        log.info('matched', found.slug, 'id=' + found.id);
-        return found;
+  const tried = [];
+  for (const raw of titles) {
+    if (!raw) continue;
+    // títulos podem ter múltiplos nomes separados por | (original|alt|alt2)
+    const candidates = String(raw).split('|').map((t) => t.trim()).filter(Boolean);
+    for (const q of candidates) {
+      tried.push(q);
+      const url = `/ajax/posts?q=${encodeURIComponent(q)}`;
+      // Pequeno delay entre queries — Cloudflare limita bursts.
+      await sleep(150);
+      let payload = null;
+      for (let attempt = 1; attempt <= 2; attempt++) {
+        try {
+          const text = await get(url, { headers: { 'X-Requested-With': 'XMLHttpRequest' } });
+          payload = JSON.parse(text);
+          break;
+        } catch (err) {
+          log.warn(`search "${q}" attempt ${attempt}: ${err.message}`);
+          if (attempt === 1) await sleep(2000);
+        }
       }
-    } catch (err) {
-      log.warn('search failed:', err.message);
+      if (!payload) continue;
+      const items = (payload && payload.data) || [];
+      if (!items.length) {
+        log.info('search empty for', q);
+        continue;
+      }
+      const best = pickBestItem(items, q);
+      const anime = parseAnimeFromItem(best);
+      if (anime) {
+        log.info(`matched ${anime.slug} (id=${anime.id}, "${anime.name}") for query "${q}"`);
+        return anime;
+      }
     }
   }
+  log.warn('search exhausted. tried:', tried.slice(0, 3).join(', '));
   return null;
 }
 
-// ---------------------- Episode page → embed id ----------------------
+// ---------------------- 2) Episode page → embed IDs ----------------------
+// /anime/<slug>-<id>-<season>-season-<episode>-episode
+// HTML tem múltiplos data-embed="N" (vários players/mirrors).
 
-function extractVideoIdAndEmbed(html) {
-  const videoId = (html.match(/const\s+videoId\s*=\s*"([^"]+)"/) || [])[1] || null;
-  const btnRe = /<button[^>]*class="[^"]*dropdown-source[^"]*"[^>]*data-embed="(\d+)"[^>]*data-player-name="([^"]*)"/g;
-  const players = [];
+function extractEmbedIds(html) {
+  const ids = new Set();
+  // padrão principal: dropdown de players
+  const re = /data-embed="(\d+)"|embed="(\d+)"|data-id="(\d+)"/g;
   let m;
-  while ((m = btnRe.exec(html)) !== null) {
-    players.push({ embed: m[1], name: decodeEntities(m[2]).trim() });
+  while ((m = re.exec(html)) !== null) {
+    const id = m[1] || m[2] || m[3];
+    if (id) ids.add(id);
   }
-  if (!players.length) {
-    const play = (html.match(/<div[^>]*class="play-btn"[^>]*data-embed="(\d+)"/) || [])[1];
-    if (play) players.push({ embed: play, name: '' });
-  }
-  return { videoId, players };
+  // pega o videoId também (info, não embed)
+  const videoId = (html.match(/const\s+videoId\s*=\s*"([^"]+)"/) || [])[1] || null;
+  // filtra IDs que parecem ser o do próprio anime (3-4 dígitos) e mantém só os "longos"
+  // (4-5 dígitos tipicamente são embeds)
+  const embedList = [...ids].filter((id) => {
+    if (id.length < 3) return false;
+    // ignora IDs muito pequenos que podem ser o do anime
+    return true;
+  });
+  return { embedIds: embedList, videoId };
 }
 
-// ---------------------- /ajax/embed → srcdoc → playerEmbed URL ----------------------
+// ---------------------- 3) /ajax/embed → srcdoc → playerEmbed ----------------------
+// O embed pode retornar:
+//   A) iframe com src="https://playsus.online/..." (wrapper JS-only, não serve)
+//   B) iframe com srcdoc="<html>...var playerEmbed='CDN_URL'..." (DIRETO MP4)
+// Só o caso B serve pro player nativo do Nuvio.
+
+function extractPlayerUrlFromIframe(iframeHtml) {
+  // Primeiro tenta pelo atributo src do iframe (vai ser playsus, mas verificamos)
+  const srcMatch = iframeHtml.match(/<iframe[^>]*\ssrc="([^"]+)"/i);
+  if (srcMatch && /playsus|player\?|blogger\.com\/video/i.test(srcMatch[1])) {
+    // Pode ter o token do blogger — mas o playsus wrapper exige JS pra resolver.
+    // Continuamos procurando srcdoc; se não achar, podemos tentar o src.
+  }
+  // Procura srcdoc (caso B, direto)
+  const srcdocMatch = iframeHtml.match(/srcdoc="([^"]+)"/i);
+  if (srcdocMatch) {
+    const decoded = decodeEntities(srcdocMatch[1]);
+    const playerMatch = decoded.match(/var\s+playerEmbed\s*=\s*"([^"]+)"/);
+    if (playerMatch) return playerMatch[1];
+  }
+  // Fallback: às vezes o playerEmbed está no HTML inteiro sem estar em srcdoc
+  const inlineMatch = iframeHtml.match(/var\s+playerEmbed\s*=\s*"([^"]+)"/);
+  if (inlineMatch) return inlineMatch[1];
+  return null;
+}
 
 async function fetchEmbedIframe(embedId, csrfToken) {
   const body = `id=${encodeURIComponent(embedId)}&_TOKEN=${encodeURIComponent(csrfToken)}`;
@@ -164,99 +189,11 @@ async function fetchEmbedIframe(embedId, csrfToken) {
   return await postAjax('/ajax/embed', body, { headers });
 }
 
-function extractPlayerUrlFromIframe(iframeHtml) {
-  const m = iframeHtml.match(/srcdoc="([^"]+)"/);
-  const decoded = m ? decodeEntities(m[1]) : decodeEntities(iframeHtml);
-  const url = decoded.match(/var\s+playerEmbed\s*=\s*"([^"]+)"/);
-  return url ? url[1] : null;
-}
-
-// ---------------------- CDN fallback (bypass Cloudflare) ----------------------
-
-function pad2(n) {
-  return String(n).padStart(2, '0');
-}
-
-const CDN_HOSTS = [
-  'cdn-s01.pixel-sus-4k-image.com',
-  'cdn-s02.pixel-sus-4k-image.com',
-  'cdn-s03.pixel-sus-4k-image.com',
-  'cdn-s04.pixel-sus-4k-image.com',
-];
-
-// Gera candidatos de slug a partir do título TMDB.
-// Inspirado no padrão do SugoiAPI: prefixos + sufixos comuns.
-const COMMON_PREFIXES = ['the', 'a', 'o'];
-const COMMON_SUFFIXES = [
-  '-blu-ray', '-dublado', '-legendado', '-hd', '-fullhd',
-  '-completo', '-anime', '-tv',
-  '-classico', '-the-classic', '-remastered',
-];
-
-function buildSlugCandidates(titles) {
-  const out = new Set();
-  for (const raw of titles) {
-    const t = String(raw || '')
-      .split('|')[0]
-      .toLowerCase()
-      .normalize('NFD')
-      .replace(/[\u0300-\u036f]/g, '')
-      .replace(/[^a-z0-9]+/g, '-')
-      .replace(/^-+|-+$/g, '');
-    if (!t) continue;
-    out.add(t);
-    // Suffixes
-    for (const suffix of COMMON_SUFFIXES) {
-      out.add(t + suffix);
-    }
-    // Prefixes (raro mas possível)
-    for (const prefix of COMMON_PREFIXES) {
-      out.add(`${prefix}-${t}`);
-    }
-  }
-  return [...out];
-}
-
-async function probeCdnUrl(slug, episode) {
-  const ep = pad2(episode);
-  const probeHeaders = { Referer: `${BASE}/`, Origin: BASE };
-  for (const host of CDN_HOSTS) {
-    const urls = [
-      `https://${host}/stream/m/${slug}/${ep}.mp4`,
-      `https://${host}/stream/${slug}/${ep}.mp4`,
-      `https://${host}/stream/m/${slug}/${episode}.mp4`,
-      `https://${host}/stream/${slug}/${episode}.mp4`,
-    ];
-    for (const url of urls) {
-      // Tenta HEAD primeiro (mais rápido).
-      try {
-        const h = await headRequest(url, { headers: probeHeaders });
-        if (h.ok && h.contentType && /video/i.test(h.contentType)) {
-          log.info('CDN HEAD hit:', url);
-          return url;
-        }
-      } catch (_) {}
-      // Fallback: GET com Range (compatível com runtimes sem suporte a HEAD).
-      try {
-        const r = await rangeProbe(url, { headers: probeHeaders });
-        if (r.ok) {
-          log.info('CDN Range hit:', url);
-          return url;
-        }
-      } catch (_) {}
-    }
-  }
-  return null;
-}
-
-async function resolveViaCdnFallback(titles, episode) {
-  const candidates = buildSlugCandidates(titles);
-  log.debug('cdn slug candidates', candidates);
-  for (const slug of candidates) {
-    const url = await probeCdnUrl(slug, episode);
-    if (url) return url;
-  }
-  return null;
+function rankEmbeds(embeds, html) {
+  // Heurística: embed que estiver marcado como "selected" ou vier primeiro é priorizado.
+  // Alguns embeds retornam playsus (ruim), outros retornam srcdoc com MP4 (bom).
+  // Como não sabemos qual é qual sem testar, retornamos na ordem que aparecem.
+  return embeds;
 }
 
 // ---------------------- Pipeline ----------------------
@@ -265,33 +202,31 @@ function buildEpisodeUrl(animePath, season, episode) {
   return `${animePath}-${season}-season-${episode}-episode`;
 }
 
-function rankPlayer(name) {
-  const n = (name || '').toLowerCase();
-  if (n.includes('fullhd') || n.includes('full hd') || n.includes('hls')) return 100;
-  if (n.includes('hd')) return 80;
-  if (n.includes('mobile') || n.includes('celular')) return 60;
-  if (n.includes('leg') || n.includes('legendado')) return 50;
-  if (n.includes('dub')) return 40;
-  return 10;
-}
-
-function detectQuality(name, url) {
-  const n = (name || '').toLowerCase();
-  const u = (url || '').toLowerCase();
-  if (n.includes('fullhd') || n.includes('full hd')) return '1080p';
-  if (n.includes('hd')) return '720p';
-  if (u.includes('1080') || u.includes('fullhd')) return '1080p';
-  if (u.includes('720') || u.includes('hd')) return '720p';
+function detectQuality(url) {
+  const u = String(url || '').toLowerCase();
+  if (u.includes('fullhd') || u.includes('1080') || u.includes('4k')) return '1080p';
+  if (u.includes('hd') || u.includes('720')) return '720p';
   return 'SD';
 }
 
-function makeStream({ url, quality, videoId, season, episode, playerName }) {
+// Detecta qualidade a partir do HTML do iframe (atributo title="FullHD / HLS").
+function detectQualityFromIframe(iframeHtml) {
+  const m = iframeHtml.match(/<iframe[^>]*\stitle="([^"]+)"/i);
+  if (!m) return null;
+  const t = m[1].toLowerCase();
+  if (t.includes('fullhd') || t.includes('1080') || t.includes('4k')) return '1080p';
+  if (t.includes('hd') || t.includes('720')) return '720p';
+  return null;
+}
+
+// Nome amigável: usa qualidade (1080p/720p) ou "Direct" como fallback.
+function makeStream({ url, quality, videoId, season, episode, source, animeSlug }) {
+  const q = quality || detectQuality(url);
+  const label = q === 'SD' ? 'Direct' : q;
   return {
-    name: `SushiAnimes • ${playerName || 'Direct CDN'}`,
-    title: `S${season}E${episode}`,
-    quality: quality || detectQuality(playerName, url),
-    // Envelopa via Worker pra adicionar Referer antes de chegar no CDN.
-    // Player nativo do Nuvio não envia headers — proxy resolve isso.
+    name: `SushiAnimes • ${label}`,
+    title: `${animeSlug ? animeSlug + ' ' : ''}S${season}E${episode}`.trim(),
+    quality: q,
     url: proxyUrl(url),
     headers: {
       'User-Agent':
@@ -303,67 +238,80 @@ function makeStream({ url, quality, videoId, season, episode, playerName }) {
   };
 }
 
-// Estratégia 1: caminho "oficial" via /ajax/embed (com retry em 503).
 async function resolveViaEmbed({ anime, season, episode, csrfToken }) {
   const episodePath = buildEpisodeUrl(anime.href, season, episode);
   log.info('episode page', episodePath);
-  const html = await get(episodePath);
-  const { videoId, players } = extractVideoIdAndEmbed(html);
-  if (!players.length) throw new Error(`No players at ${episodePath}`);
 
-  const ranked = players
-    .map((p) => ({ ...p, score: rankPlayer(p.name) }))
-    .sort((a, b) => b.score - a.score);
+  let html = null;
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try {
+      html = await get(episodePath);
+      break;
+    } catch (err) {
+      log.warn(`episode page attempt ${attempt}: ${err.message}`);
+      if (attempt < 3) await sleep(2000 * attempt);
+    }
+  }
+  if (!html) throw new Error(`Failed to fetch ${episodePath}`);
 
-  for (const p of ranked) {
-    for (let attempt = 1; attempt <= 2; attempt++) {
+  const { embedIds, videoId } = extractEmbedIds(html);
+  if (!embedIds.length) throw new Error(`No embeds at ${episodePath}`);
+
+  log.info('found', embedIds.length, 'embed candidates:', embedIds.join(', '));
+  const ordered = rankEmbeds(embedIds, html);
+
+  for (const embedId of ordered) {
+    for (let attempt = 1; attempt <= 3; attempt++) {
       try {
-        const iframeHtml = await fetchEmbedIframe(p.embed, csrfToken);
-        const url = extractPlayerUrlFromIframe(iframeHtml);
-        if (url) {
-          return makeStream({
-            url,
-            videoId,
-            season,
-            episode,
-            playerName: p.name,
-          });
+        await sleep(300); // gentil entre embeds
+        const iframeHtml = await fetchEmbedIframe(embedId, csrfToken);
+        const playerUrl = extractPlayerUrlFromIframe(iframeHtml);
+        if (playerUrl) {
+          if (/\.(mp4|m3u8|m4v)(\?|$)/i.test(playerUrl)) {
+            // Tenta detectar qualidade do atributo title do iframe (FullHD / HLS, etc)
+            const qualityFromHtml = detectQualityFromIframe(iframeHtml);
+            const url = playerUrl;
+            const quality = qualityFromHtml || detectQuality(url);
+            log.info(`embed ${embedId} → direct video (${quality}):`, url);
+            return makeStream({
+              url,
+              quality,
+              videoId,
+              season,
+              episode,
+              source: `Embed ${embedId}`,
+              animeSlug: anime.slug,
+            });
+          }
+          log.info('embed', embedId, '→ wrapper URL (não direto):', playerUrl.slice(0, 80));
+        } else {
+          log.info('embed', embedId, '→ sem playerEmbed');
         }
+        break;
       } catch (err) {
-        log.warn(`player ${p.name} attempt ${attempt}: ${err.message}`);
-        if (attempt === 1 && isRetryableError(err.message)) {
-          await sleep(3500); // respeita retry-after do server (3s)
+        log.warn(`embed ${embedId} attempt ${attempt}: ${err.message}`);
+        if (attempt < 3 && isRetryableError(err.message)) {
+          await sleep(3500);
         } else {
           break;
         }
       }
     }
   }
-  throw new Error('All embed players failed');
+  throw new Error('No embed returned a direct video URL');
 }
 
 // ---------------------- Entry ----------------------
 
-async function getCached(path, ttlMs = 60_000) {
-  const key = `sushi:html:${path}`;
-  const cached = cache.get(key);
-  if (cached) return cached;
-  const html = await get(path);
-  cache.set(key, html, ttlMs);
-  return html;
-}
-
 async function extractStreams(tmdbId, mediaType, season, episode, opts = {}) {
   log.info(`sushianimes v${VERSION} | tmdbId=${tmdbId} ${mediaType} S${season}E${episode}`);
   const errors = [];
-  let csrfToken = null;
-  let anime = null;
 
-  // 0) Carrega titles do TMDB (ou fallback hardcoded se app sem key).
+  // 0) Carrega titles do TMDB
   const { getTmdbTitles } = await import('../utils/metadata.js');
   let titles = (await getTmdbTitles(tmdbId, mediaType)) || [];
 
-  // Aceita título passado pelo app via parâmetro extra ou globalThis.
+  // Aceita título injetado pelo app
   const extraTitle =
     opts.title ||
     (typeof globalThis !== 'undefined' && globalThis.currentMediaTitle) ||
@@ -373,40 +321,20 @@ async function extractStreams(tmdbId, mediaType, season, episode, opts = {}) {
     titles = [extraTitle, ...titles];
   }
 
-  const titlesForSearch =
-    titles.length > 0
-      ? titles
-      : [`tmdb-${tmdbId}`];
-  log.info('titles', titlesForSearch.slice(0, 2));
+  const titlesForSearch = titles.length > 0 ? titles : [`tmdb-${tmdbId}`];
+  log.info('titles', titlesForSearch.slice(0, 3));
 
-  // 0) Estratégia INSTANTÂNEA: shortcut para IDs conhecidos (TMDB, MAL, AniList).
-  //    Retorna URL SEM probe — a verificação pode falhar em runtimes limitados.
-  //    Melhor ter o stream (que pode falhar no player) do que nenhum.
-  const knownSlug = KNOWN_SLUGS[String(tmdbId)];
-  if (knownSlug) {
-    const ep = pad2(episode);
-    const url = `https://cdn-s01.pixel-sus-4k-image.com/stream/m/${knownSlug}/${ep}.mp4`;
-    log.info(`KNOWN shortcut (id=${tmdbId}): ${url}`);
-    return [makeStream({ url, season, episode, playerName: `Known (${knownSlug})` })];
-  }
-
-  // 1) Estratégia CDN direto via probe — testa múltiplos hosts/slugs.
+  // 1) CSRF token da home
+  let csrfToken = null;
   try {
-    const url = await resolveViaCdnFallback(titlesForSearch, episode);
-    if (url) {
-      return [makeStream({ url, season, episode, playerName: 'CDN Direct' })];
-    }
-  } catch (err) {
-    errors.push(`cdn-fast: ${err.message}`);
-  }
-
-  // 2) Estratégia oficial: search + /ajax/embed.
-  try {
-    csrfToken = extractCsrfToken(await getCached('/'));
+    csrfToken = extractCsrfToken(await get('/'));
   } catch (err) {
     errors.push(`csrf: ${err.message}`);
+    log.warn('csrf failed:', err.message);
   }
 
+  // 2) Search → {slug, id}
+  let anime = null;
   if (csrfToken) {
     try {
       anime = await searchAnime(titlesForSearch);
@@ -415,31 +343,18 @@ async function extractStreams(tmdbId, mediaType, season, episode, opts = {}) {
     }
   }
 
-  if (anime && csrfToken) {
-    try {
-      const stream = await resolveViaEmbed({ anime, season, episode, csrfToken });
-      return [stream];
-    } catch (err) {
-      errors.push(`embed: ${err.message}`);
-    }
+  if (!anime) {
+    log.error('No anime found for', titlesForSearch.slice(0, 2));
+    return [];
   }
 
-  // 3) Última tentativa: para episódio 1, tenta slugs sempre conhecidos.
-  if (episode === 1) {
-    for (const slug of ALWAYS_TRY_SLUGS) {
-      const ep = pad2(1);
-      const url = `https://cdn-s01.pixel-sus-4k-image.com/stream/m/${slug}/${ep}.mp4`;
-      log.info(`Trying always-try slug: ${url}`);
-      try {
-        const probe = await rangeProbe(url, { headers: { Referer: `${BASE}/` } });
-        if (probe.ok) {
-          return [makeStream({ url, season, episode, playerName: `AlwaysTry (${slug})` })];
-        }
-      } catch (_) {}
-    }
+  // 3) Episode page → embed IDs → /ajax/embed → playerEmbed
+  try {
+    return [await resolveViaEmbed({ anime, season, episode, csrfToken })];
+  } catch (err) {
+    errors.push(`embed: ${err.message}`);
   }
 
-  // 4) Nada funcionou.
   log.error('All strategies failed. Errors:', errors.join(' | '));
   return [];
 }
@@ -447,14 +362,10 @@ async function extractStreams(tmdbId, mediaType, season, episode, opts = {}) {
 export {
   extractStreams,
   extractCsrfToken,
-  pickBestResult,
-  extractVideoIdAndEmbed,
+  searchAnime,
+  extractEmbedIds,
   extractPlayerUrlFromIframe,
-  resolveViaCdnFallback,
-  buildSlugCandidates,
-  probeCdnUrl,
-  rankPlayer,
-  detectQuality,
-  buildEpisodeUrl,
+  resolveViaEmbed,
+  proxyUrl,
 };
 export default { extractStreams };
