@@ -9,8 +9,18 @@ function getApiKey() {
   if (typeof process !== 'undefined' && process.env && process.env.TMDB_API_KEY) {
     return process.env.TMDB_API_KEY;
   }
-  if (typeof globalThis !== 'undefined' && globalThis.TMDB_API_KEY) {
-    return globalThis.TMDB_API_KEY;
+  if (typeof globalThis !== 'undefined') {
+    // Várias formas que diferentes forks de Nuvio expõem a key.
+    const g = globalThis;
+    return (
+      g.TMDB_API_KEY ||
+      g.tmdbApiKey ||
+      g.tmdb_api_key ||
+      g.tmdbKey ||
+      g.tmdb_key ||
+      (g.SUSHI_CONFIG && g.SUSHI_CONFIG.tmdbKey) ||
+      null
+    );
   }
   return null;
 }
