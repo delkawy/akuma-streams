@@ -275,14 +275,25 @@ async function getCached(path, ttlMs = 60_000) {
   return html;
 }
 
-async function extractStreams(tmdbId, mediaType, season, episode) {
+async function extractStreams(tmdbId, mediaType, season, episode, opts = {}) {
   const errors = [];
   let csrfToken = null;
   let anime = null;
 
-  // 0) Carrega titles do TMDB (cache 24h, não depende do site).
+  // 0) Carrega titles do TMDB (ou fallback hardcoded se app sem key).
   const { getTmdbTitles } = await import('../utils/metadata.js');
-  const titles = (await getTmdbTitles(tmdbId, mediaType)) || [];
+  let titles = (await getTmdbTitles(tmdbId, mediaType)) || [];
+
+  // Aceita título passado pelo app via parâmetro extra ou globalThis.
+  const extraTitle =
+    opts.title ||
+    (typeof globalThis !== 'undefined' && globalThis.currentMediaTitle) ||
+    null;
+  if (extraTitle) {
+    log.info('using injected title:', extraTitle);
+    titles = [extraTitle, ...titles];
+  }
+
   const titlesForSearch =
     titles.length > 0
       ? titles

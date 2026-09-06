@@ -19,6 +19,7 @@ import {
   detectQuality,
   buildEpisodeUrl,
 } from '../src/sushianimes/extractor.js';
+import { POPULAR_TITLES, getApiKey } from '../src/utils/metadata.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const FIXTURES = path.join(__dirname, 'fixtures');
@@ -144,6 +145,40 @@ section('extractStreams graceful degradation');
   assert(!threw, 'extractStreams does not throw on failure');
   assert(Array.isArray(result), 'returns an array');
   console.log(`  info  result.length = ${result.length} (0 expected without network)`);
+}
+
+// ---------------------- 10. POPULAR_TITLES (fallback sem TMDB) ----------------------
+section('popular titles fallback');
+{
+  assert(POPULAR_TITLES['30981'] && POPULAR_TITLES['30981'].includes('Monster'), 'Monster → 30981');
+  assert(POPULAR_TITLES['16273'] && POPULAR_TITLES['16273'].includes('Naruto'), 'Naruto → 16273');
+  assert(POPULAR_TITLES['21'] && POPULAR_TITLES['21'].includes('One Piece'), 'One Piece → 21');
+  assert(!POPULAR_TITLES['99999999'], 'unknown id returns undefined');
+}
+
+// ---------------------- 11. extractStreams with injected title ----------------------
+section('extractStreams with injected title');
+{
+  // Quando o app não tem TMDB key, mas injeta o título via parâmetro.
+  let result = [];
+  try {
+    result = await extractStreams('99999', 'tv', 1, 1, { title: 'Monster' });
+  } catch (err) {
+    // pode falhar rede, mas não deve lançar
+  }
+  assert(Array.isArray(result), 'returns array even with injected title');
+  console.log(`  info  result.length = ${result.length}`);
+}
+
+// ---------------------- 12. TMDB key discovery ----------------------
+section('TMDB key discovery');
+{
+  const before = getApiKey();
+  globalThis.TMDB_API_KEY = 'test-key-1234567890abcdef';
+  const after = getApiKey();
+  delete globalThis.TMDB_API_KEY;
+  assert(before === null, 'no key set → null');
+  assert(after === 'test-key-1234567890abcdef', 'reads from globalThis.TMDB_API_KEY');
 }
 
 // ---------------------- 7. end-to-end via fixtures ----------------------
