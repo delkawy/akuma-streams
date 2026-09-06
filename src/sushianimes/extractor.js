@@ -2,7 +2,7 @@ import { get, postAjax } from './http.js';
 import { makeLogger } from '../utils/logger.js';
 
 const log = makeLogger('sushi:extractor');
-const VERSION = '0.8.1';
+const VERSION = '0.8.3';
 
 // Cloudflare Worker que adiciona Referer + Origin pra tocar MP4 no player nativo.
 const PROXY_URL = 'https://akuma-streams-proxy.delkawy.workers.dev';

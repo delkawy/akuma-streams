@@ -6,7 +6,7 @@ const PROVIDERS = [
   {
     id: 'sushianimes',
     entry: 'src/sushianimes/index.js',
-    outfile: 'providers/sushianimes.js',
+    outfile: 'providers/sushianimes.v2.js',
   },
 ];
 

@@ -1,6 +1,6 @@
 {
   "name": "Akuma Streams",
-      "version": "0.8.1",
+      "version": "0.8.3",
   "description": "Coleção de providers Nuvio. Hospeda provedores que raspam sites públicos e devolvem streams diretos (.mp4/.m3u8) para o player.",
   "author": "delkawy",
   "scrapers": [
@@ -8,10 +8,10 @@
       "id": "sushianimes",
       "name": "SushiAnimes",
       "description": "Animes dublados/legendados do sushianimes.com.br — funciona pra QUALQUER anime via busca automática. Streams .mp4 via CDN, proxyados por Cloudflare Worker pra contornar proteção de Referer.",
-  "version": "0.8.1",
+  "version": "0.8.3",
       "author": "delkawy",
       "supportedTypes": ["tv", "movie"],
-      "filename": "providers/sushianimes.js",
+      "filename": "providers/sushianimes.v2.js",
       "enabled": true,
       "logo": "https://sushianimes.com.br/favicon.ico",
       "contentLanguage": ["pt-BR"],
