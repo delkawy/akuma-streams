@@ -1,4 +1,4 @@
-import { fetchText, postForm, DEFAULT_UA } from '../utils/http.js';
+import { fetchText, postForm, headRequest, DEFAULT_UA } from '../utils/http.js';
 import { makeLogger } from '../utils/logger.js';
 import * as cache from '../utils/cache.js';
 
@@ -42,5 +42,5 @@ function buildCookieHeader(extra) {
   return withAgeCookie(extra || {});
 }
 
-export { BASE, DEFAULT_UA, get, postAjax, getCached, buildCookieHeader, withAgeCookie };
-export default { get, postAjax, getCached, BASE, DEFAULT_UA, buildCookieHeader };
+export { BASE, DEFAULT_UA, get, postAjax, getCached, headRequest, buildCookieHeader, withAgeCookie };
+export default { get, postAjax, getCached, headRequest, BASE, DEFAULT_UA, buildCookieHeader };

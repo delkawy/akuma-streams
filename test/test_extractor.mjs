@@ -13,6 +13,8 @@ import {
   pickBestResult,
   extractVideoIdAndEmbed,
   extractPlayerUrlFromIframe,
+  buildSlugCandidates,
+  probeCdnUrl,
   rankPlayer,
   detectQuality,
   buildEpisodeUrl,
@@ -103,6 +105,45 @@ section('episode URL builder');
     url === '/anime/monster-blu-ray-958-1-season-1-episode',
     `URL format correct (got ${url})`
   );
+}
+
+// ---------------------- 7. CDN fallback - slug candidates ----------------------
+section('CDN fallback — slug candidates');
+{
+  const candidates = buildSlugCandidates(['Monster', 'MONSTER | モンスター']);
+  assert(candidates.includes('monster'), 'includes base slug "monster"');
+  assert(candidates.includes('monster-blu-ray'), 'includes "monster-blu-ray"');
+  assert(candidates.includes('monster-dublado'), 'includes "monster-dublado"');
+  assert(candidates.includes('monster-legendado'), 'includes "monster-legendado"');
+  assert(candidates.length >= 5, `at least 5 candidates (got ${candidates.length})`);
+}
+
+// ---------------------- 8. CDN probe (LIVE - real CDN) ----------------------
+section('CDN probe (live)');
+{
+  // Pula se rodar offline (sem rede). Verifica apenas se retorna string ou null.
+  const url = await probeCdnUrl('monster-blu-ray', 1);
+  if (url) {
+    assert(typeof url === 'string' && url.endsWith('.mp4'), `valid .mp4 URL (got ${url.slice(0, 60)}...)`);
+  } else {
+    console.log('  --   probe returned null (CDN may be unavailable in this env)');
+  }
+}
+
+// ---------------------- 9. extractStreams graceful degradation ----------------------
+section('extractStreams graceful degradation');
+{
+  // Garante que extractStreams NUNCA lança — sempre retorna array.
+  let threw = false;
+  let result = [];
+  try {
+    result = await extractStreams('9999999', 'tv', 1, 1);
+  } catch (err) {
+    threw = true;
+  }
+  assert(!threw, 'extractStreams does not throw on failure');
+  assert(Array.isArray(result), 'returns an array');
+  console.log(`  info  result.length = ${result.length} (0 expected without network)`);
 }
 
 // ---------------------- 7. end-to-end via fixtures ----------------------

@@ -59,5 +59,21 @@ async function postForm(url, form, opts = {}) {
   return text;
 }
 
-export { fetchText, fetchJson, postForm, defaultHeaders, DEFAULT_UA };
-export default { fetchText, fetchJson, postForm, defaultHeaders, DEFAULT_UA };
+async function headRequest(url, opts = {}) {
+  log.debug('HEAD', url);
+  try {
+    const headers = defaultHeaders(opts.headers);
+    const res = await fetch(url, Object.assign({ method: 'HEAD' }, opts, { headers }));
+    return {
+      ok: res.ok,
+      status: res.status,
+      contentType: res.headers.get('content-type') || '',
+      contentLength: parseInt(res.headers.get('content-length') || '0', 10),
+    };
+  } catch (err) {
+    return { ok: false, status: 0, error: err.message };
+  }
+}
+
+export { fetchText, fetchJson, postForm, headRequest, defaultHeaders, DEFAULT_UA };
+export default { fetchText, fetchJson, postForm, headRequest, defaultHeaders, DEFAULT_UA };

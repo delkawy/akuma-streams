@@ -1,4 +1,4 @@
-import { get, postAjax, BASE } from './http.js';
+import { get, postAjax, headRequest, BASE } from './http.js';
 import { makeLogger } from '../utils/logger.js';
 import * as cache from '../utils/cache.js';
 
@@ -19,32 +19,25 @@ function decodeEntities(s) {
     .replace(/&#(\d+);/g, (_, d) => String.fromCodePoint(parseInt(d, 10)));
 }
 
-function extractAttribute(html, attr, search) {
-  // Busca `attr="value"` após um marcador search (ex: nome de tag ou classe).
-  const re = new RegExp(`${attr}="([^"]*)"`, 'g');
-  let m;
-  while ((m = re.exec(html)) !== null) {
-    if (!search || html.slice(Math.max(0, m.index - 200), m.index).includes(search)) {
-      return decodeEntities(m[1]);
-    }
-  }
-  return null;
-}
-
 function extractCsrfToken(html) {
-  // 1) var _TOKEN = "...";
   let m = html.match(/var\s+_TOKEN\s*=\s*"([^"]+)"/);
   if (m) return m[1];
-  // 2) <meta name="csrf-token" content="...">
   m = html.match(/<meta\s+name=["']csrf-token["']\s+content=["']([^"']+)["']/i);
   if (m) return m[1];
   return null;
 }
 
-// ---------------------- Anime search ----------------------
+function isRetryableError(msg) {
+  return /503|retryable|cloudflare|bot|forbidden/i.test(String(msg || ''));
+}
+
+function sleep(ms) {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
+// ---------------------- Search ----------------------
 
 function pickBestResult(html, query) {
-  // Aceita tanto /anime/<slug>-<id> quanto https://...anime/<slug>-<id>.
   const linkRe = /href="(?:\/anime\/|https?:\/\/[^\/]+\/anime\/)([a-z0-9-]+)-(\d+)(?=["'])/gi;
   const seen = new Set();
   const results = [];
@@ -78,11 +71,15 @@ async function searchAnime(titles) {
     if (!q) continue;
     const path = `/search/${q}`;
     log.info('searching', path);
-    const html = await get(path);
-    const found = pickBestResult(html, title);
-    if (found) {
-      log.info('matched', found.slug, 'id=' + found.id);
-      return found;
+    try {
+      const html = await get(path);
+      const found = pickBestResult(html, title);
+      if (found) {
+        log.info('matched', found.slug, 'id=' + found.id);
+        return found;
+      }
+    } catch (err) {
+      log.warn('search failed:', err.message);
     }
   }
   return null;
@@ -91,23 +88,17 @@ async function searchAnime(titles) {
 // ---------------------- Episode page → embed id ----------------------
 
 function extractVideoIdAndEmbed(html) {
-  // videoId: const videoId = "ep-XXXX";
   const videoId = (html.match(/const\s+videoId\s*=\s*"([^"]+)"/) || [])[1] || null;
-
-  // Botão selecionado é o melhor candidato; mas queremos TODOS para fallback.
   const btnRe = /<button[^>]*class="[^"]*dropdown-source[^"]*"[^>]*data-embed="(\d+)"[^>]*data-player-name="([^"]*)"/g;
   const players = [];
   let m;
   while ((m = btnRe.exec(html)) !== null) {
     players.push({ embed: m[1], name: decodeEntities(m[2]).trim() });
   }
-
-  // fallback: play-btn
   if (!players.length) {
     const play = (html.match(/<div[^>]*class="play-btn"[^>]*data-embed="(\d+)"/) || [])[1];
     if (play) players.push({ embed: play, name: '' });
   }
-
   return { videoId, players };
 }
 
@@ -120,72 +111,81 @@ async function fetchEmbedIframe(embedId, csrfToken) {
     'X-Requested-With': 'XMLHttpRequest',
     Accept: 'text/html, */*; q=0.01',
   };
-  const html = await postAjax('/ajax/embed', body, { headers });
-  return html;
+  return await postAjax('/ajax/embed', body, { headers });
 }
 
 function extractPlayerUrlFromIframe(iframeHtml) {
-  // iframe srcdoc="..."> → decoderEntities → regex playerEmbed="..."
-  const srcdoc = extractAttribute(iframeHtml, 'srcdoc') || iframeHtml;
-  const decoded = decodeEntities(srcdoc);
-  const m = decoded.match(/var\s+playerEmbed\s*=\s*"([^"]+)"/);
-  if (m) return m[1];
+  const m = iframeHtml.match(/srcdoc="([^"]+)"/);
+  const decoded = m ? decodeEntities(m[1]) : decodeEntities(iframeHtml);
+  const url = decoded.match(/var\s+playerEmbed\s*=\s*"([^"]+)"/);
+  return url ? url[1] : null;
+}
+
+// ---------------------- CDN fallback (bypass Cloudflare) ----------------------
+
+function pad2(n) {
+  return String(n).padStart(2, '0');
+}
+
+const CDN_HOSTS = [
+  'cdn-s01.pixel-sus-4k-image.com',
+  'cdn-s02.pixel-sus-4k-image.com',
+  'cdn-s03.pixel-sus-4k-image.com',
+];
+
+// Gera candidatos de slug a partir do título TMDB.
+function buildSlugCandidates(titles) {
+  const out = new Set();
+  for (const raw of titles) {
+    const t = String(raw || '')
+      .split('|')[0]
+      .toLowerCase()
+      .normalize('NFD')
+      .replace(/[\u0300-\u036f]/g, '')
+      .replace(/[^a-z0-9]+/g, '-')
+      .replace(/^-+|-+$/g, '');
+    if (!t) continue;
+    out.add(t);
+    for (const suffix of ['-blu-ray', '-dublado', '-legendado', '-hd', '-fullhd']) {
+      out.add(t + suffix);
+    }
+  }
+  return [...out];
+}
+
+async function probeCdnUrl(slug, episode) {
+  const ep = pad2(episode);
+  const probeHeaders = { Referer: `${BASE}/`, Origin: BASE };
+  for (const host of CDN_HOSTS) {
+    const urls = [
+      `https://${host}/stream/m/${slug}/${ep}.mp4`,
+      `https://${host}/stream/${slug}/${ep}.mp4`,
+    ];
+    for (const url of urls) {
+      const r = await headRequest(url, { headers: probeHeaders });
+      if (r.ok && r.contentType && r.contentType.includes('video')) {
+        log.info('CDN direct hit:', url, `(${r.contentLength} bytes)`);
+        return url;
+      }
+    }
+  }
+  return null;
+}
+
+async function resolveViaCdnFallback(titles, episode) {
+  const candidates = buildSlugCandidates(titles);
+  log.debug('cdn slug candidates', candidates);
+  for (const slug of candidates) {
+    const url = await probeCdnUrl(slug, episode);
+    if (url) return url;
+  }
   return null;
 }
 
 // ---------------------- Pipeline ----------------------
 
 function buildEpisodeUrl(animePath, season, episode) {
-  // /anime/<slug>-<id>-<season>-season-<episode>-episode
   return `${animePath}-${season}-season-${episode}-episode`;
-}
-
-async function resolveEpisode({ anime, season, episode, csrfToken }) {
-  const episodePath = buildEpisodeUrl(anime.href, season, episode);
-  log.info('episode page', episodePath);
-  const html = await get(episodePath);
-
-  const { videoId, players } = extractVideoIdAndEmbed(html);
-  if (!players.length) {
-    throw new Error(`No players found at ${episodePath}`);
-  }
-
-  // Preferência: FullHD > Mobile > outros (ordem do site, mas pegamos todos como fallback).
-  const ranked = players
-    .map((p) => ({ ...p, score: rankPlayer(p.name) }))
-    .sort((a, b) => b.score - a.score);
-
-  const streams = [];
-  const seen = new Set();
-
-  for (const p of ranked) {
-    try {
-      const iframeHtml = await fetchEmbedIframe(p.embed, csrfToken);
-      const url = extractPlayerUrlFromIframe(iframeHtml);
-      if (!url || seen.has(url)) continue;
-      seen.add(url);
-
-      streams.push({
-        name: `SushiAnimes • ${p.name || 'Player'}`,
-        title: `Monster - S${season}E${episode}`,
-        quality: detectQuality(p.name, url),
-        url,
-        headers: {
-          Referer: `${BASE}/`,
-          'User-Agent':
-            'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 ' +
-            '(KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36',
-        },
-        isDirect: true,
-        videoId,
-      });
-    } catch (err) {
-      log.warn(`player ${p.name} (${p.embed}) failed:`, err.message);
-    }
-  }
-
-  if (!streams.length) throw new Error('No playable streams resolved.');
-  return streams;
 }
 
 function rankPlayer(name) {
@@ -208,39 +208,126 @@ function detectQuality(name, url) {
   return 'SD';
 }
 
+function makeStream({ url, quality, videoId, season, episode, playerName }) {
+  return {
+    name: `SushiAnimes • ${playerName || 'Direct CDN'}`,
+    title: `S${season}E${episode}`,
+    quality: quality || detectQuality(playerName, url),
+    url,
+    headers: {
+      Referer: `${BASE}/`,
+      'User-Agent':
+        'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 ' +
+        '(KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36',
+    },
+    isDirect: true,
+    videoId: videoId || null,
+  };
+}
+
+// Estratégia 1: caminho "oficial" via /ajax/embed (com retry em 503).
+async function resolveViaEmbed({ anime, season, episode, csrfToken }) {
+  const episodePath = buildEpisodeUrl(anime.href, season, episode);
+  log.info('episode page', episodePath);
+  const html = await get(episodePath);
+  const { videoId, players } = extractVideoIdAndEmbed(html);
+  if (!players.length) throw new Error(`No players at ${episodePath}`);
+
+  const ranked = players
+    .map((p) => ({ ...p, score: rankPlayer(p.name) }))
+    .sort((a, b) => b.score - a.score);
+
+  for (const p of ranked) {
+    for (let attempt = 1; attempt <= 2; attempt++) {
+      try {
+        const iframeHtml = await fetchEmbedIframe(p.embed, csrfToken);
+        const url = extractPlayerUrlFromIframe(iframeHtml);
+        if (url) {
+          return makeStream({
+            url,
+            videoId,
+            season,
+            episode,
+            playerName: p.name,
+          });
+        }
+      } catch (err) {
+        log.warn(`player ${p.name} attempt ${attempt}: ${err.message}`);
+        if (attempt === 1 && isRetryableError(err.message)) {
+          await sleep(3500); // respeita retry-after do server (3s)
+        } else {
+          break;
+        }
+      }
+    }
+  }
+  throw new Error('All embed players failed');
+}
+
 // ---------------------- Entry ----------------------
 
-async function getAnimePageHtml(animePath) {
-  // Cache por path — evita refetch em chamadas repetidas.
-  const key = `sushi:anime:${animePath}`;
+async function getCached(path, ttlMs = 60_000) {
+  const key = `sushi:html:${path}`;
   const cached = cache.get(key);
   if (cached) return cached;
-  const html = await get(animePath);
-  cache.set(key, html, 5 * 60_000);
+  const html = await get(path);
+  cache.set(key, html, ttlMs);
   return html;
 }
 
 async function extractStreams(tmdbId, mediaType, season, episode) {
-  // 1. CSRF — pega da home (pode estar em qualquer página; home é confiável).
-  const homeHtml = await get('/');
-  const csrfToken = extractCsrfToken(homeHtml);
-  if (!csrfToken) throw new Error('CSRF token not found on homepage.');
+  const errors = [];
+  let csrfToken = null;
+  let anime = null;
 
-  // 2. Títulos TMDB.
+  // 0) Carrega titles do TMDB (cache 24h, não depende do site).
   const { getTmdbTitles } = await import('../utils/metadata.js');
-  const titles = await getTmdbTitles(tmdbId, mediaType);
-
-  // 3. Search fallback (se TMDB indisponível, usa fallback "monster" básico).
-  const searchTitles =
+  const titles = (await getTmdbTitles(tmdbId, mediaType)) || [];
+  const titlesForSearch =
     titles.length > 0
       ? titles
-      : ['monster'];
+      : [`tmdb-${tmdbId}`];
+  log.info('titles', titlesForSearch.slice(0, 2));
 
-  const anime = await searchAnime(searchTitles);
-  if (!anime) throw new Error(`Anime not found on sushianimes for tmdbId=${tmdbId}`);
+  // 1) CSRF + Anime via search — tenta, mas não falha se bloqueado.
+  try {
+    csrfToken = extractCsrfToken(await getCached('/'));
+  } catch (err) {
+    errors.push(`csrf: ${err.message}`);
+  }
 
-  // 4. Resolve episode(s).
-  return await resolveEpisode({ anime, season, episode, csrfToken });
+  if (csrfToken) {
+    try {
+      anime = await searchAnime(titlesForSearch);
+    } catch (err) {
+      errors.push(`search: ${err.message}`);
+    }
+  }
+
+  // 2) Estratégia 1: /ajax/embed (caminho oficial).
+  if (anime && csrfToken) {
+    try {
+      const stream = await resolveViaEmbed({ anime, season, episode, csrfToken });
+      return [stream];
+    } catch (err) {
+      errors.push(`embed: ${err.message}`);
+    }
+  }
+
+  // 3) Estratégia 2: CDN direto — bypassa Cloudflare usando slug candidato do TMDB.
+  log.warn('Falling back to CDN direct probe (bypasses Cloudflare)');
+  try {
+    const url = await resolveViaCdnFallback(titlesForSearch, episode);
+    if (url) {
+      return [makeStream({ url, season, episode, playerName: 'CDN Direct' })];
+    }
+  } catch (err) {
+    errors.push(`cdn: ${err.message}`);
+  }
+
+  // 4) Nada funcionou.
+  log.error('All strategies failed. Errors:', errors.join(' | '));
+  return [];
 }
 
 export {
@@ -249,6 +336,9 @@ export {
   pickBestResult,
   extractVideoIdAndEmbed,
   extractPlayerUrlFromIframe,
+  resolveViaCdnFallback,
+  buildSlugCandidates,
+  probeCdnUrl,
   rankPlayer,
   detectQuality,
   buildEpisodeUrl,
