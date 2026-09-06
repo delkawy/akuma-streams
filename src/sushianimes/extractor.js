@@ -319,7 +319,18 @@ async function extractStreams(tmdbId, mediaType, season, episode, opts = {}) {
       : [`tmdb-${tmdbId}`];
   log.info('titles', titlesForSearch.slice(0, 2));
 
-  // 1) CSRF + Anime via search — tenta, mas não falha se bloqueado.
+  // 1) Estratégia RÁPIDA: CDN direto — não depende do site, só do CDN.
+  //    Se o slug existe no CDN, retorna imediatamente. Bypassa Cloudflare.
+  try {
+    const url = await resolveViaCdnFallback(titlesForSearch, episode);
+    if (url) {
+      return [makeStream({ url, season, episode, playerName: 'CDN Direct' })];
+    }
+  } catch (err) {
+    errors.push(`cdn-fast: ${err.message}`);
+  }
+
+  // 2) Estratégia oficial: search + /ajax/embed (mais confiável mas bloqueável).
   try {
     csrfToken = extractCsrfToken(await getCached('/'));
   } catch (err) {
@@ -334,7 +345,6 @@ async function extractStreams(tmdbId, mediaType, season, episode, opts = {}) {
     }
   }
 
-  // 2) Estratégia 1: /ajax/embed (caminho oficial).
   if (anime && csrfToken) {
     try {
       const stream = await resolveViaEmbed({ anime, season, episode, csrfToken });
@@ -344,18 +354,7 @@ async function extractStreams(tmdbId, mediaType, season, episode, opts = {}) {
     }
   }
 
-  // 3) Estratégia 2: CDN direto — bypassa Cloudflare usando slug candidato do TMDB.
-  log.warn('Falling back to CDN direct probe (bypasses Cloudflare)');
-  try {
-    const url = await resolveViaCdnFallback(titlesForSearch, episode);
-    if (url) {
-      return [makeStream({ url, season, episode, playerName: 'CDN Direct' })];
-    }
-  } catch (err) {
-    errors.push(`cdn: ${err.message}`);
-  }
-
-  // 4) Nada funcionou.
+  // 3) Nada funcionou.
   log.error('All strategies failed. Errors:', errors.join(' | '));
   return [];
 }
