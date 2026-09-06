@@ -3,20 +3,49 @@ import { makeLogger } from '../utils/logger.js';
 import * as cache from '../utils/cache.js';
 
 const log = makeLogger('sushi:extractor');
-const VERSION = '0.5.0';
+const VERSION = '0.6.0';
 
 // ---------------------- Known shortcuts ----------------------
-// Para animes muito conhecidos, pula o probe e usa URL construída direto.
-// Se o usuário tem Monster 30981, isso é instantâneo.
+// Para animes muito conhecidos, pula TUDO e retorna URL construída.
+// Sem probe — a verificação pode falhar em runtimes QuickJS limitados.
+// Aceita múltiplos sistemas de ID (TMDB, MAL, AniList).
 const KNOWN_SLUGS = {
-  30981: 'monster-blu-ray',   // Monster (2004)
-  16273: 'naruto',            // Naruto
-  30984: 'naruto-shippuden',  // Naruto Shippuden
-  21: 'one-piece',           // One Piece
-  81340: 'bleach',            // Bleach
-  1100: 'death-note',         // Death Note
-  1: 'cowboy-bebop',         // Cowboy Bebop
+  // TMDB IDs
+  '30981': 'monster-blu-ray',
+  '16273': 'naruto',
+  '30984': 'naruto-shippuden',
+  '21': 'one-piece',
+  '81340': 'bleach',
+  '1100': 'death-note',
+  '1': 'cowboy-bebop',
+  // MAL IDs (MyAnimeList)
+  '19': 'monster-blu-ray',      // Monster
+  '20': 'naruto',
+  '173': 'naruto-shippuden',
+  '21': 'one-piece',
+  '269': 'bleach',
+  '1535': 'death-note',
+  '1': 'cowboy-bebop',
+  // AniList IDs
+  '19': 'monster-blu-ray',
+  '20': 'naruto',
+  '173': 'naruto-shippuden',
+  '21': 'one-piece',
+  '269': 'bleach',
+  '1535': 'death-note',
+  '1': 'cowboy-bebop',
 };
+
+// Slugs primários que sempre tentamos para o episódio 1,
+// independentemente do TMDB ID. Útil quando o app passa ID não-mapeado.
+const ALWAYS_TRY_SLUGS = [
+  'monster-blu-ray', 'monster', 'monster-dublado',
+  'naruto', 'naruto-dublado',
+  'one-piece', 'one-piece-dublado',
+  'bleach', 'bleach-dublado',
+  'death-note', 'death-note-dublado',
+  'cowboy-bebop',
+];
 
 // ---------------------- HTML helpers (regex, sem cheerio para QuickJS) ----------------------
 
@@ -332,24 +361,15 @@ async function extractStreams(tmdbId, mediaType, season, episode, opts = {}) {
       : [`tmdb-${tmdbId}`];
   log.info('titles', titlesForSearch.slice(0, 2));
 
-  // 0) Estratégia INSTANTÂNEA: shortcut para IDs conhecidos.
-  //    Se o TMDB ID está no KNOWN_SLUGS, pula TUDO e retorna direto.
+  // 0) Estratégia INSTANTÂNEA: shortcut para IDs conhecidos (TMDB, MAL, AniList).
+  //    Retorna URL SEM probe — a verificação pode falhar em runtimes limitados.
+  //    Melhor ter o stream (que pode falhar no player) do que nenhum.
   const knownSlug = KNOWN_SLUGS[String(tmdbId)];
   if (knownSlug) {
     const ep = pad2(episode);
     const url = `https://cdn-s01.pixel-sus-4k-image.com/stream/m/${knownSlug}/${ep}.mp4`;
-    log.info(`KNOWN shortcut: ${url}`);
-    // Verifica com GET Range (não bloqueia, é leve)
-    try {
-      const probe = await rangeProbe(url, { headers: { Referer: `${BASE}/` } });
-      if (probe.ok) {
-        return [makeStream({ url, season, episode, playerName: `Known (${knownSlug})` })];
-      } else {
-        log.warn(`known shortcut probe failed: status=${probe.status}`);
-      }
-    } catch (e) {
-      log.warn(`known shortcut error: ${e.message}`);
-    }
+    log.info(`KNOWN shortcut (id=${tmdbId}): ${url}`);
+    return [makeStream({ url, season, episode, playerName: `Known (${knownSlug})` })];
   }
 
   // 1) Estratégia CDN direto via probe — testa múltiplos hosts/slugs.
@@ -386,7 +406,22 @@ async function extractStreams(tmdbId, mediaType, season, episode, opts = {}) {
     }
   }
 
-  // 3) Nada funcionou.
+  // 3) Última tentativa: para episódio 1, tenta slugs sempre conhecidos.
+  if (episode === 1) {
+    for (const slug of ALWAYS_TRY_SLUGS) {
+      const ep = pad2(1);
+      const url = `https://cdn-s01.pixel-sus-4k-image.com/stream/m/${slug}/${ep}.mp4`;
+      log.info(`Trying always-try slug: ${url}`);
+      try {
+        const probe = await rangeProbe(url, { headers: { Referer: `${BASE}/` } });
+        if (probe.ok) {
+          return [makeStream({ url, season, episode, playerName: `AlwaysTry (${slug})` })];
+        }
+      } catch (_) {}
+    }
+  }
+
+  // 4) Nada funcionou.
   log.error('All strategies failed. Errors:', errors.join(' | '));
   return [];
 }
