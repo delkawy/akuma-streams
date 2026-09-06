@@ -178,6 +178,14 @@ const CDN_HOSTS = [
 ];
 
 // Gera candidatos de slug a partir do título TMDB.
+// Inspirado no padrão do SugoiAPI: prefixos + sufixos comuns.
+const COMMON_PREFIXES = ['the', 'a', 'o'];
+const COMMON_SUFFIXES = [
+  '-blu-ray', '-dublado', '-legendado', '-hd', '-fullhd',
+  '-completo', '-anime', '-tv',
+  '-classico', '-the-classic', '-remastered',
+];
+
 function buildSlugCandidates(titles) {
   const out = new Set();
   for (const raw of titles) {
@@ -190,11 +198,13 @@ function buildSlugCandidates(titles) {
       .replace(/^-+|-+$/g, '');
     if (!t) continue;
     out.add(t);
-    for (const suffix of [
-      '-blu-ray', '-dublado', '-legendado', '-hd', '-fullhd',
-      '-completo', '-anime', '-tv',
-    ]) {
+    // Suffixes
+    for (const suffix of COMMON_SUFFIXES) {
       out.add(t + suffix);
+    }
+    // Prefixes (raro mas possível)
+    for (const prefix of COMMON_PREFIXES) {
+      out.add(`${prefix}-${t}`);
     }
   }
   return [...out];
