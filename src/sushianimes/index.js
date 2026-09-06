@@ -3,9 +3,6 @@ import { makeLogger } from '../utils/logger.js';
 
 const log = makeLogger('sushianimes');
 
-// Assinatura padrão Nuvio: getStreams(tmdbId, mediaType, season, episode)
-// Aceita também: getStreams(tmdbId, mediaType, season, episode, { title })
-// (alguns forks do Nuvio passam contexto extra)
 async function getStreams(tmdbId, mediaType, season, episode, opts) {
   try {
     const streams = await extractStreams(tmdbId, mediaType, season, episode, opts);
@@ -14,6 +11,20 @@ async function getStreams(tmdbId, mediaType, season, episode, opts) {
     log.error('getStreams failed:', err.message);
     return [];
   }
+}
+
+// Exposição global — QuickJS/Nuvio procura a função via globalThis.
+// Tentamos vários nomes comuns em diferentes forks do Nuvio.
+try {
+  globalThis.getStreams = getStreams;
+  globalThis.SushiAnimes = { getStreams };
+  globalThis.sushianimes = { getStreams };
+  if (typeof self !== 'undefined') {
+    self.getStreams = getStreams;
+    self.SushiAnimes = { getStreams };
+  }
+} catch (e) {
+  // Ignora se globalThis não estiver disponível
 }
 
 export { getStreams };
