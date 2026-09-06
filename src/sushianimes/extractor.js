@@ -3,7 +3,20 @@ import { makeLogger } from '../utils/logger.js';
 import * as cache from '../utils/cache.js';
 
 const log = makeLogger('sushi:extractor');
-const VERSION = '0.4.0';
+const VERSION = '0.5.0';
+
+// ---------------------- Known shortcuts ----------------------
+// Para animes muito conhecidos, pula o probe e usa URL construída direto.
+// Se o usuário tem Monster 30981, isso é instantâneo.
+const KNOWN_SLUGS = {
+  30981: 'monster-blu-ray',   // Monster (2004)
+  16273: 'naruto',            // Naruto
+  30984: 'naruto-shippuden',  // Naruto Shippuden
+  21: 'one-piece',           // One Piece
+  81340: 'bleach',            // Bleach
+  1100: 'death-note',         // Death Note
+  1: 'cowboy-bebop',         // Cowboy Bebop
+};
 
 // ---------------------- HTML helpers (regex, sem cheerio para QuickJS) ----------------------
 
@@ -319,8 +332,27 @@ async function extractStreams(tmdbId, mediaType, season, episode, opts = {}) {
       : [`tmdb-${tmdbId}`];
   log.info('titles', titlesForSearch.slice(0, 2));
 
-  // 1) Estratégia RÁPIDA: CDN direto — não depende do site, só do CDN.
-  //    Se o slug existe no CDN, retorna imediatamente. Bypassa Cloudflare.
+  // 0) Estratégia INSTANTÂNEA: shortcut para IDs conhecidos.
+  //    Se o TMDB ID está no KNOWN_SLUGS, pula TUDO e retorna direto.
+  const knownSlug = KNOWN_SLUGS[String(tmdbId)];
+  if (knownSlug) {
+    const ep = pad2(episode);
+    const url = `https://cdn-s01.pixel-sus-4k-image.com/stream/m/${knownSlug}/${ep}.mp4`;
+    log.info(`KNOWN shortcut: ${url}`);
+    // Verifica com GET Range (não bloqueia, é leve)
+    try {
+      const probe = await rangeProbe(url, { headers: { Referer: `${BASE}/` } });
+      if (probe.ok) {
+        return [makeStream({ url, season, episode, playerName: `Known (${knownSlug})` })];
+      } else {
+        log.warn(`known shortcut probe failed: status=${probe.status}`);
+      }
+    } catch (e) {
+      log.warn(`known shortcut error: ${e.message}`);
+    }
+  }
+
+  // 1) Estratégia CDN direto via probe — testa múltiplos hosts/slugs.
   try {
     const url = await resolveViaCdnFallback(titlesForSearch, episode);
     if (url) {
@@ -330,7 +362,7 @@ async function extractStreams(tmdbId, mediaType, season, episode, opts = {}) {
     errors.push(`cdn-fast: ${err.message}`);
   }
 
-  // 2) Estratégia oficial: search + /ajax/embed (mais confiável mas bloqueável).
+  // 2) Estratégia oficial: search + /ajax/embed.
   try {
     csrfToken = extractCsrfToken(await getCached('/'));
   } catch (err) {
